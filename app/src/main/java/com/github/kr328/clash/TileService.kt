@@ -1,76 +1,104 @@
 package com.github.kr328.clash
 
-import android.content.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.graphics.drawable.Icon
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import com.github.kr328.clash.core.event.ProcessEvent
-import com.github.kr328.clash.service.ClashService
-import com.github.kr328.clash.service.Constants
-import com.github.kr328.clash.service.IClashService
-import com.github.kr328.clash.utils.ServiceUtils
+import com.github.kr328.clash.common.Permissions
+import com.github.kr328.clash.common.ids.Intents
+import com.github.kr328.clash.remote.RemoteUtils
+import com.github.kr328.clash.service.util.startClashService
+import com.github.kr328.clash.service.util.stopClashService
 
 class TileService : TileService() {
+    private var currentProfile = ""
+    private var clashRunning = false
+
     override fun onClick() {
         val tile = qsTile
 
-        when ( tile.state ) {
+        when (tile.state) {
             Tile.STATE_INACTIVE -> {
-                ServiceUtils.startProxyService(this)
+                startClashService()
             }
             Tile.STATE_ACTIVE -> {
-                val binder = clashStatusReceiver.peekService(this, Intent(this, ClashService::class.java))
-
-                runCatching {
-                    val clash = IClashService.Stub.asInterface(binder)
-
-                    clash?.stop()
-                }
+                stopClashService()
             }
         }
     }
 
     override fun onStartListening() {
-        refreshTileStatus()
+        refreshStatus()
     }
 
-    private fun refreshTileStatus() {
-        when ( currentStatus ) {
-            ProcessEvent.STARTED -> {
-                qsTile.state = Tile.STATE_ACTIVE
-            }
-            ProcessEvent.STOPPED -> {
-                qsTile.state = Tile.STATE_INACTIVE
-            }
-        }
+    private fun refreshStatus() {
+        if (qsTile == null)
+            return
+
+        qsTile.state = if (clashRunning)
+            Tile.STATE_ACTIVE
+        else
+            Tile.STATE_INACTIVE
+
+        qsTile.label = if (currentProfile.isEmpty())
+            getText(R.string.launch_name)
+        else
+            currentProfile
+
+        qsTile.icon = Icon.createWithResource(this, R.drawable.ic_notification)
 
         qsTile.updateTile()
     }
 
-    private val clashStatusReceiver = object: BroadcastReceiver() {
+    private val clashStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            refreshTileStatus()
+            when (intent?.action) {
+                Intents.INTENT_ACTION_CLASH_STARTED -> {
+                    clashRunning = true
+
+                    currentProfile = ""
+                }
+                Intents.INTENT_ACTION_CLASH_STOPPED -> {
+                    clashRunning = false
+
+                    currentProfile = ""
+                }
+                Intents.INTENT_ACTION_PROFILE_LOADED -> {
+                    currentProfile = RemoteUtils
+                        .getCurrentClashProfileName(this@TileService) ?: ""
+                }
+            }
+
+            refreshStatus()
         }
     }
 
     override fun onCreate() {
         super.onCreate()
 
-        registerReceiver(clashStatusReceiver,
-            IntentFilter(Constants.CLASH_PROCESS_BROADCAST_ACTION))
+        registerReceiver(
+            clashStatusReceiver,
+            IntentFilter().apply {
+                addAction(Intents.INTENT_ACTION_CLASH_STARTED)
+                addAction(Intents.INTENT_ACTION_CLASH_STOPPED)
+                addAction(Intents.INTENT_ACTION_PROFILE_LOADED)
+            },
+            Permissions.PERMISSION_RECEIVE_BROADCASTS,
+            null
+        )
+
+        val name = RemoteUtils.getCurrentClashProfileName(this)
+
+        clashRunning = name != null
+        currentProfile = name ?: ""
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
         unregisterReceiver(clashStatusReceiver)
-    }
-
-    private val currentStatus: ProcessEvent
-    get() {
-        val service = clashStatusReceiver.peekService(this, Intent(this, ClashService::class.java))
-
-        return runCatching {
-            IClashService.Stub.asInterface(service)?.currentProcessStatus
-        }.getOrNull() ?: ProcessEvent.STOPPED
     }
 }

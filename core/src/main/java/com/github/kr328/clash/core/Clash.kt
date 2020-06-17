@@ -1,193 +1,164 @@
 package com.github.kr328.clash.core
 
-import android.content.Context
-import android.net.LocalSocket
-import com.github.kr328.clash.core.event.BandwidthEvent
+import bridge.Bridge
+import bridge.TunCallback
+import com.github.kr328.clash.common.Global
 import com.github.kr328.clash.core.event.LogEvent
-import com.github.kr328.clash.core.event.ProcessEvent
-import com.github.kr328.clash.core.event.SpeedEvent
-import com.github.kr328.clash.core.model.*
-import com.github.kr328.clash.core.utils.Log
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonConfiguration
-import kotlinx.serialization.stringify
+import com.github.kr328.clash.core.model.General
+import com.github.kr328.clash.core.model.Proxy
+import com.github.kr328.clash.core.model.ProxyGroup
+import com.github.kr328.clash.core.model.Traffic
+import com.github.kr328.clash.core.transact.DoneCallbackImpl
+import com.github.kr328.clash.core.transact.ProxyCollectionImpl
+import com.github.kr328.clash.core.transact.ProxyGroupCollectionImpl
+import kotlinx.coroutines.CompletableDeferred
 import java.io.File
-import java.io.FileDescriptor
-import java.io.IOException
+import java.io.InputStream
 
-class Clash(
-    context: Context,
-    clashDir: File,
-    controllerPath: File,
-    listener: (ProcessEvent) -> Unit
-) : BaseClash(controllerPath) {
-    companion object {
-        const val COMMAND_PING = 0
-        const val COMMAND_TUN_START = 1
-        const val COMMAND_TUN_STOP = 2
-        const val COMMAND_PROFILE_RELOAD = 4
-        const val COMMAND_QUERY_PROXIES = 5
-        const val COMMAND_PULL_SPEED = 6
-        const val COMMAND_PULL_LOG = 7
-        const val COMMAND_PULL_BANDWIDTH = 8
-        const val COMMAND_SET_PROXY = 9
-        const val COMMAND_QUERY_GENERAL = 10
-        const val COMMAND_URL_TEST = 11
+object Clash {
+    private val logReceivers = mutableMapOf<String, (LogEvent) -> Unit>()
 
-        const val PING_REPLY = 233
+    init {
+        val context = Global.application
 
-        const val DEFAULT_URL_TEST_TIMEOUT = 5000
-        const val DEFAULT_URL_TEST_URL = "https://www.gstatic.com/generate_204"
+        val bytes = context.assets.open("Country.mmdb")
+            .use(InputStream::readBytes)
+
+        Bridge.initCore(bytes, context.cacheDir.absolutePath, BuildConfig.VERSION_NAME)
+        Bridge.reset()
     }
 
-    val process = ClashProcess(context, clashDir, controllerPath, listener)
-
-    fun ping(): Boolean {
-        return runControlNoException(COMMAND_PING) { _, input, _ ->
-            input.readInt() == PING_REPLY
-        } ?: false
+    fun start() {
+        Bridge.reset()
     }
 
-    fun loadProfile(file: File, selected: Map<String, String>): List<String> {
-        return runControl(COMMAND_PROFILE_RELOAD) { _, input, output ->
-            output.writeString(
-                Json(JsonConfiguration.Stable)
-                    .stringify(
-                        LoadProfilePacket.Request.serializer(),
-                        LoadProfilePacket.Request(file.absolutePath, selected)
-                    )
-            )
+    fun stop() {
+        Bridge.reset()
+    }
 
-            val result = Json(JsonConfiguration.Stable)
-                .parse(LoadProfilePacket.Response.serializer(), input.readString())
-
-            if (result.error.isNotEmpty()) {
-                throw IOException(result.error)
+    fun startTunDevice(
+        fd: Int,
+        mtu: Int,
+        gateway: String,
+        mirror: String,
+        dns: String,
+        onNewSocket: (Int) -> Boolean,
+        onTunStop: () -> Unit
+    ) {
+        Bridge.startTunDevice(fd.toLong(), mtu.toLong(), gateway, mirror, dns, object: TunCallback {
+            override fun onCreateSocket(fd: Long) {
+                onNewSocket(fd.toInt())
             }
 
-            return@runControl result.invalidSelected
-        }
-    }
-
-    fun queryGeneral(): GeneralPacket {
-        return runCatching {
-            runControl(COMMAND_QUERY_GENERAL) { _, input, _ ->
-                Json(JsonConfiguration.Stable).parse(GeneralPacket.serializer(), input.readString())
+            override fun onStop() {
+                onTunStop()
             }
-        }.getOrDefault(
-            GeneralPacket(
-                GeneralPacket.Ports(0, 0, 0, 0),
-                GeneralPacket.Mode.DIRECT
-            )
-        )
-    }
-
-    fun queryProxies(): RawProxyPacket {
-        return runControl(COMMAND_QUERY_PROXIES) { _, input, _ ->
-            val data = input.readString()
-
-            Json(JsonConfiguration.Stable.copy(strictMode = false))
-                .parse(RawProxyPacket.serializer(), data)
-        }
-    }
-
-    fun setSelectProxy(key: String, value: String) {
-        runControl(COMMAND_SET_PROXY) { _, input, output ->
-            output.writeString(
-                Json(JsonConfiguration.Stable)
-                    .stringify(
-                        SetProxyPacket.Request.serializer(),
-                        SetProxyPacket.Request(key, value)
-                    )
-            )
-
-            val response = Json(JsonConfiguration.Stable).parse(
-                SetProxyPacket.Response.serializer(),
-                input.readString()
-            )
-
-            if (response.error.isNotEmpty())
-                throw IOException(response.error)
-        }
-    }
-
-    fun pullSpeedEvent(initial: (LocalSocket) -> Unit, callback: (SpeedEvent) -> Unit) {
-        runControlNoException(COMMAND_PULL_SPEED) { socket, input, _ ->
-            initial(socket)
-
-            while (!Thread.currentThread().isInterrupted) {
-                callback(
-                    Json(JsonConfiguration.Stable).parse(
-                        SpeedEvent.serializer(),
-                        input.readString()
-                    )
-                )
-            }
-        }
-    }
-
-    fun pullLogsEvent(initial: (LocalSocket) -> Unit, callback: (LogEvent) -> Unit) {
-        runControlNoException(COMMAND_PULL_LOG) { socket, input, _ ->
-            initial(socket)
-
-            while (!Thread.currentThread().isInterrupted) {
-                callback(
-                    Json(JsonConfiguration.Stable).parse(
-                        LogEvent.serializer(),
-                        input.readString()
-                    )
-                )
-            }
-        }
-    }
-
-    fun pullBandwidthEvent(initial: (LocalSocket) -> Unit, callback: (BandwidthEvent) -> Unit) {
-        runControlNoException(COMMAND_PULL_BANDWIDTH) { socket, input, _ ->
-            initial(socket)
-
-            while (!Thread.currentThread().isInterrupted) {
-                callback(
-                    Json(JsonConfiguration.Stable).parse(
-                        BandwidthEvent.serializer(),
-                        input.readString()
-                    )
-                )
-            }
-        }
-    }
-
-    fun startUrlTest(proxies: List<String>, callback: (String, Long) -> Unit) {
-        runControl(COMMAND_URL_TEST) { _, input, output ->
-            output.writeString(Json(JsonConfiguration.Stable)
-                .stringify(UrlTestPacket.Request.serializer(),
-                    UrlTestPacket.Request(proxies, DEFAULT_URL_TEST_TIMEOUT, DEFAULT_URL_TEST_URL)))
-
-            while ( true ) {
-                val data = input.readString()
-                if ( data.isEmpty() )
-                    return@runControl
-
-                val response = Json(JsonConfiguration.Stable)
-                    .parse(UrlTestPacket.Response.serializer(), data)
-
-                callback(response.name, response.delay)
-            }
-        }
-
-        Log.i("Url test exited")
-    }
-
-    fun startTunDevice(fd: FileDescriptor, mtu: Int) {
-        runControl(COMMAND_TUN_START) { socket, _, output ->
-            socket.setFileDescriptorsForSend(arrayOf(fd))
-            socket.outputStream.write(0)
-            socket.outputStream.flush()
-            output.writeInt(mtu)
-            output.writeInt(0x243)
-        }
+        })
     }
 
     fun stopTunDevice() {
-        runControlNoException(COMMAND_TUN_STOP)
+        Bridge.stopTunDevice()
+    }
+
+    fun appendDns(dns: List<String>) {
+        Bridge.resetDnsAppend(dns.joinToString(","))
+    }
+
+    fun setDnsOverrideEnabled(enabled: Boolean) {
+        Bridge.setDnsOverrideEnabled(enabled)
+    }
+
+    fun loadProfile(path: File, baseDir: File): CompletableDeferred<Unit> {
+        return DoneCallbackImpl().apply {
+            Bridge.loadProfileFile(path.absolutePath, baseDir.absolutePath, this)
+        }
+    }
+
+    fun downloadProfile(url: String, output: File, baseDir: File): CompletableDeferred<Unit> {
+        return DoneCallbackImpl().apply {
+            Bridge.downloadProfileAndCheck(url, output.absolutePath, baseDir.absolutePath, this)
+        }
+    }
+
+    fun downloadProfile(fd: Int, output: File, baseDir: File): CompletableDeferred<Unit> {
+        return DoneCallbackImpl().apply {
+            Bridge.readProfileAndCheck(fd.toLong(), output.absolutePath, baseDir.absolutePath, this)
+        }
+    }
+
+    fun queryProxyGroups(): List<ProxyGroup> {
+        return ProxyGroupCollectionImpl().also { Bridge.queryAllProxyGroups(it) }
+            .filterNotNull()
+            .map { group ->
+                ProxyGroup(group.name,
+                    Proxy.Type.fromString(group.type),
+                    group.delay,
+                    group.current,
+                    ProxyCollectionImpl().also { pc ->
+                        group.queryAllProxies(pc)
+                    }.filterNotNull().map {
+                        Proxy(it.name, Proxy.Type.fromString(it.type), it.delay)
+                    })
+            }
+    }
+
+    fun setSelectedProxy(name: String, selected: String): Boolean {
+        return Bridge.setSelectedProxy(name, selected)
+    }
+
+    fun startHealthCheck(name: String): CompletableDeferred<Unit> {
+        return DoneCallbackImpl().apply {
+            Bridge.startUrlTest(name, this)
+        }
+    }
+
+    fun setProxyMode(mode: String) {
+        Bridge.setProxyMode(mode)
+    }
+
+    fun queryGeneral(): General {
+        val t = Bridge.queryGeneral()
+
+        return General(
+            General.Mode.fromString(t.mode),
+            t.httpPort.toInt(), t.socksPort.toInt(), t.redirectPort.toInt()
+        )
+    }
+
+    fun queryTraffic(): Traffic {
+        val data = Bridge.queryTraffic()
+
+        return Traffic(data.upload, data.download)
+    }
+
+    fun queryBandwidth(): Traffic {
+        val data = Bridge.queryBandwidth()
+
+        return Traffic(data.upload, data.download)
+    }
+
+    fun registerLogReceiver(key: String, receiver: (LogEvent) -> Unit) {
+        synchronized(logReceivers) {
+            logReceivers[key] = receiver
+
+            Bridge.setLogCallback(this::onLogEvent)
+        }
+    }
+
+    fun unregisterLogReceiver(key: String) {
+        synchronized(logReceivers) {
+            logReceivers.remove(key)
+
+            if (logReceivers.isEmpty())
+                Bridge.setLogCallback(null)
+        }
+    }
+
+    private fun onLogEvent(level: String, payload: String) {
+        synchronized(logReceivers) {
+            logReceivers.forEach {
+                it.value(LogEvent(LogEvent.Level.fromString(level), payload))
+            }
+        }
     }
 }

@@ -1,77 +1,137 @@
 package com.github.kr328.clash.adapter
 
 import android.content.Context
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.RadioButton
+import android.widget.TextView
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.github.kr328.clash.R
-import com.github.kr328.clash.service.data.ClashProfileEntity
-import com.github.kr328.clash.view.RadioFatItem
-import java.text.SimpleDateFormat
-import java.util.*
+import com.github.kr328.clash.service.model.Profile
+import com.github.kr328.clash.utils.IntervalUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-class ProfileAdapter(private val context: Context,
-                     private val onClick: (ClashProfileEntity) -> Unit,
-                     private val onOperateClick: (ClashProfileEntity) -> Unit,
-                     private val onLongClicked: (View,ClashProfileEntity) -> Unit) :
-    RecyclerView.Adapter<ProfileAdapter.ProfileViewHolder>() {
-    var profiles: Array<ClashProfileEntity> = emptyArray()
+class ProfileAdapter(private val context: Context, private val callback: Callback) :
+    RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+    interface Callback {
+        fun onProfileClicked(entity: Profile)
+        fun onMenuClicked(entity: Profile)
+        fun onNewProfile()
+    }
 
-    class ProfileViewHolder(val view: RadioFatItem) : RecyclerView.ViewHolder(view)
+    private var entities: List<Profile> = emptyList()
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ProfileViewHolder {
-        return ProfileViewHolder(
-            RadioFatItem(context).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
+    class EntityHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val root: View = view.findViewById(R.id.root)
+        val menu: View = view.findViewById(R.id.menu)
+        val radio: RadioButton = view.findViewById(R.id.radio)
+        val name: TextView = view.findViewById(R.id.name)
+        val type: TextView = view.findViewById(R.id.type)
+        val interval: TextView = view.findViewById(R.id.interval)
+    }
+
+    class FooterHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val root: View = view.findViewById(R.id.root)
+    }
+
+    suspend fun setEntitiesAsync(new: List<Profile>) {
+        val old = withContext(Dispatchers.Main) {
+            entities
+        }
+
+        val result = withContext(Dispatchers.Default) {
+            DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+                override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean =
+                    old[oldItemPosition].id == new[newItemPosition].id
+
+                override fun areContentsTheSame(
+                    oldItemPosition: Int,
+                    newItemPosition: Int
+                ): Boolean = old[oldItemPosition] == new[newItemPosition]
+
+                override fun getOldListSize(): Int = old.size
+                override fun getNewListSize(): Int = new.size
+            }, false)
+        }
+
+        withContext(Dispatchers.Main) {
+            entities = new
+            result.dispatchUpdatesTo(this@ProfileAdapter)
+        }
+    }
+
+    override fun getItemViewType(position: Int): Int {
+        return if (position == entities.size)
+            Int.MAX_VALUE
+        else
+            super.getItemViewType(position)
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        if (viewType == Int.MAX_VALUE) {
+            return FooterHolder(
+                LayoutInflater.from(context).inflate(
+                    R.layout.adapter_profile_footer,
+                    parent,
+                    false
                 )
-            }
+            )
+        }
+        return EntityHolder(
+            LayoutInflater.from(context).inflate(
+                R.layout.adapter_profile_entity,
+                parent,
+                false
+            )
         )
     }
 
     override fun getItemCount(): Int {
-        return profiles.size
+        return entities.size + 1
     }
 
-    override fun onBindViewHolder(holder: ProfileViewHolder, position: Int) {
-        val current = profiles[position]
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        when (holder) {
+            is EntityHolder -> {
+                val current = entities[position]
 
-        holder.view.title = current.name
-        holder.view.isChecked = current.active
-        holder.view.setOnClickListener {
-            onClick(current)
-        }
-        holder.view.setOnOperationOnClickListener(View.OnClickListener {
-            onOperateClick(current)
-        })
-        holder.view.setOnLongClickListener {
-            onLongClicked(it, current).run { true }
-        }
+                holder.radio.isChecked = current.active
+                holder.name.text = current.name
+                holder.type.text = getTypeName(current.type)
+                holder.interval.text = offsetDate(current.lastModified)
 
-        val profileUpdateDate = GregorianCalendar().apply {
-            timeInMillis = current.lastUpdate
-        }
-        val now = Calendar.getInstance()
-
-        val formatter = if ( profileUpdateDate.get(Calendar.YEAR) == now.get(Calendar.YEAR) &&
-            profileUpdateDate.get(Calendar.MONTH) == now.get(Calendar.MONTH) &&
-                profileUpdateDate.get(Calendar.DAY_OF_MONTH) == now.get(Calendar.DAY_OF_MONTH) )
-            SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-        else
-            SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
-
-        when {
-            ClashProfileEntity.isFileToken(current.token) -> {
-                holder.view.operation = context.getDrawable(R.drawable.ic_edit)
-                holder.view.summary = context.getString(R.string.clash_profile_item_summary_file,
-                    formatter.format(profileUpdateDate.time))
+                holder.root.setOnClickListener {
+                    callback.onProfileClicked(current)
+                }
+                holder.menu.setOnClickListener {
+                    callback.onMenuClicked(current)
+                }
             }
-            ClashProfileEntity.isUrlToken(current.token) -> {
-                holder.view.operation = context.getDrawable(R.drawable.ic_sync)
-                holder.view.summary = context.getString(R.string.clash_profile_item_summary_url,
-                    formatter.format(profileUpdateDate.time))
+            is FooterHolder -> {
+                holder.root.setOnClickListener {
+                    callback.onNewProfile()
+                }
             }
         }
+    }
+
+    private fun getTypeName(type: Profile.Type): CharSequence {
+        return when (type) {
+            Profile.Type.FILE ->
+                context.getText(R.string.file)
+            Profile.Type.URL ->
+                context.getText(R.string.url)
+            Profile.Type.EXTERNAL ->
+                context.getText(R.string.external)
+            else ->
+                context.getText(R.string.unknown)
+        }
+    }
+
+    private fun offsetDate(date: Long): CharSequence {
+        return IntervalUtils.intervalString(context, System.currentTimeMillis() - date)
     }
 }

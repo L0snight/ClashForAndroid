@@ -1,6 +1,7 @@
 .gradle
 build/
 /app/release/
+/captures
 
 # Ignore Gradle GUI config
 gradle-app.setting
@@ -21,9 +22,6 @@ gradle-app.setting
 # KeyStore
 *.keystore
 *.jks
-
-# gradle
-.gradle
 
 # clion cmake build
 cmake-build-*

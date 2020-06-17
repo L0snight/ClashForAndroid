@@ -1,11 +1,11 @@
 module github.com/kr328/cfa
 
-go 1.13
+go 1.14
 
 require (
 	github.com/Dreamacro/clash v0.0.0 // local
-	github.com/google/go-cmp v0.3.1 // indirect
-	golang.org/x/sys v0.0.0-20191128015809-6d18c012aee9
+	github.com/kr328/tun2socket v0.0.0-20200524072930-c348f97fe81e
+	github.com/miekg/dns v1.1.29
 )
 
-replace github.com/Dreamacro/clash v0.0.0 => ./clash
+replace github.com/Dreamacro/clash => ./clash

@@ -1,21 +1,8 @@
 package com.github.kr328.clash.utils
 
+import android.content.Context
+import com.github.kr328.clash.Constants
 import java.io.File
-import java.security.SecureRandom
-import kotlin.math.absoluteValue
 
-object FileUtils {
-    private val random = SecureRandom()
-
-    fun generateRandomFile(dir: File, suffix: String = ""): File {
-        dir.mkdirs()
-
-        var file: File
-
-        do {
-            file = dir.resolve(random.nextLong().absoluteValue.toString() + suffix)
-        } while (file.exists())
-
-        return file
-    }
-}
+val Context.logsDir: File
+    get() = (externalCacheDir ?: cacheDir).resolve(Constants.LOG_DIR_NAME)

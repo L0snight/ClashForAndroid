@@ -1,137 +1,221 @@
 package com.github.kr328.clash
 
-import android.content.ComponentName
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
+import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
-import android.os.IBinder
+import android.view.*
+import android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import com.github.kr328.clash.core.event.*
-import com.github.kr328.clash.core.utils.Log
-import com.github.kr328.clash.service.ClashService
-import com.github.kr328.clash.service.IClashEventObserver
-import com.github.kr328.clash.service.IClashService
-import java.util.concurrent.LinkedBlockingQueue
-import kotlin.concurrent.thread
+import androidx.appcompat.app.AppCompatDelegate
+import androidx.appcompat.widget.Toolbar
+import androidx.coordinatorlayout.widget.CoordinatorLayout
+import com.github.kr328.clash.common.utils.createLanguageConfigurationContext
+import com.github.kr328.clash.preference.UiSettings
+import com.github.kr328.clash.remote.Broadcasts
+import com.google.android.material.snackbar.Snackbar
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
-abstract class BaseActivity : AppCompatActivity(), IClashEventObserver {
-    companion object {
-        private var activityCount: Int = 0
+abstract class BaseActivity : AppCompatActivity(), CoroutineScope by MainScope() {
+    class EmptyBroadcastReceiver : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {}
+    }
 
-        private val paddingRequest = LinkedBlockingQueue<(IClashService) -> Unit>()
-        private var clashConnection: ClashConnection? = null
-
-        class ClashConnection : ServiceConnection {
-            private var requestHandler: Thread? = null
-            private var clash: IClashService? = null
-
-            override fun onServiceDisconnected(name: ComponentName?) {
-                synchronized(BaseActivity::class.java) {
-                    Log.i("ClashService disconnected")
-
-                    requestHandler?.interrupt()
-                    requestHandler = null
-                }
+    private val receiver = object : Broadcasts.Receiver {
+        override fun onStarted() {
+            launch {
+                onClashStarted()
             }
+        }
 
-            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                synchronized(BaseActivity::class) {
-                    Log.i("ClashService connected")
+        override fun onStopped(cause: String?) {
+            launch {
+                onClashStopped(cause)
+            }
+        }
 
-                    clash = IClashService.Stub.asInterface(service)
-                    requestHandler = thread {
-                        try {
-                            while (!Thread.currentThread().isInterrupted) {
-                                val block = paddingRequest.take()
+        override fun onProfileChanged() {
+            launch {
+                onClashProfileChanged()
+            }
+        }
 
-                                clash?.run(block)
-                            }
-                        } catch (e: InterruptedException) {
-                        }
-
-                        Log.i("ClashConnect exited")
-
-                        synchronized(BaseActivity::class.java) {
-                            clash = null
-                            requestHandler = null
-                        }
-                    }
-                }
+        override fun onProfileLoaded() {
+            launch {
+                onClashProfileLoaded()
             }
         }
     }
 
-    protected fun runClash(block: (IClashService) -> Unit) {
-        paddingRequest.offer(block)
+    private var overrideRootView: View? = null
+
+    val clashRunning: Boolean
+        get() = Broadcasts.clashRunning
+    val rootView: View
+        get() = overrideRootView ?: window.decorView
+    var menu: Menu? = null
+    lateinit var uiSettings: UiSettings
+        private set
+    private lateinit var language: String
+    private lateinit var darkMode: String
+
+    open suspend fun onClashStarted() {}
+    open suspend fun onClashStopped(reason: String?) {}
+    open suspend fun onClashProfileChanged() {}
+    open suspend fun onClashProfileLoaded() {}
+
+    override fun setContentView(layoutResID: Int) {
+        val base = CoordinatorLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+
+            val displayMetrics = resources.displayMetrics
+
+            if (displayMetrics.widthPixels > displayMetrics.heightPixels) {
+                val padding = (displayMetrics.widthPixels - displayMetrics.heightPixels) / 2
+
+                setPadding(padding, 0, padding, 0)
+            }
+        }
+
+        overrideRootView = LayoutInflater.from(this).inflate(layoutResID, base, true)
+
+        super.setContentView(base)
+    }
+
+    override fun attachBaseContext(newBase: Context?) {
+        val base = newBase ?: return super.attachBaseContext(newBase)
+
+        uiSettings = UiSettings(base)
+
+        language = uiSettings.get(UiSettings.LANGUAGE)
+
+        super.attachBaseContext(base.createLanguageConfigurationContext(language))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        synchronized(BaseActivity::class.java) {
-            if (clashConnection == null) {
-                clashConnection = ClashConnection()
+        language = uiSettings.get(UiSettings.LANGUAGE)
 
-                applicationContext.bindService(
-                    Intent(this, ClashService::class.java),
-                    clashConnection!!,
-                    Context.BIND_AUTO_CREATE
-                )
-            }
+        resetDarkMode()
 
-            activityCount++
+        resetLightNavigationBar()
+
+        title = resolveActivityTitle()
+    }
+
+    override fun onStart() {
+        super.onStart()
+
+        if (language != uiSettings.get(UiSettings.LANGUAGE) || darkMode != uiSettings.get(UiSettings.DARK_MODE))
+            recreate()
+
+        Broadcasts.register(receiver)
+    }
+
+    override fun onStop() {
+        super.onStop()
+
+        Broadcasts.unregister(receiver)
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        this.menu = menu
+        return super.onCreateOptionsMenu(menu)
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (super.onOptionsItemSelected(item))
+            return true
+
+        if (item.itemId == android.R.id.home) {
+            onSupportNavigateUp()
+            return true
+        }
+
+        return false
+    }
+
+    override fun setSupportActionBar(toolbar: Toolbar?) {
+        super.setSupportActionBar(toolbar)
+
+        supportActionBar?.apply {
+            setDisplayHomeAsUpEnabled(shouldDisplayHomeAsUpEnabled())
         }
     }
 
-    override fun onDestroy() {
-        synchronized(BaseActivity::class.java) {
-            if (--activityCount <= 0) {
-                if (clashConnection != null) {
-                    applicationContext.unbindService(clashConnection!!)
-                    clashConnection?.onServiceDisconnected(null)
+    open fun shouldDisplayHomeAsUpEnabled(): Boolean {
+        return true
+    }
 
-                    clashConnection = null
-                }
-            }
-        }
+    override fun onSupportNavigateUp(): Boolean {
+        this.onBackPressed()
+
+        return true
+    }
+
+    override fun onDestroy() {
+        cancel()
 
         super.onDestroy()
     }
 
-    private val observerBinder = object : IClashEventObserver.Stub() {
-        override fun onLogEvent(event: LogEvent?) =
-            this@BaseActivity.onLogEvent(event)
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
 
-        override fun onProcessEvent(event: ProcessEvent?) =
-            this@BaseActivity.onProcessEvent(event)
+        recreate()
+    }
 
-        override fun onErrorEvent(event: ErrorEvent?) =
-            this@BaseActivity.onErrorEvent(event)
+    protected fun showSnackbarException(title: String, detail: String?) {
+        Snackbar.make(rootView, title, Snackbar.LENGTH_LONG).setAction(R.string.detail) {
+            AlertDialog.Builder(this).setTitle(R.string.detail).setMessage(detail ?: "Unknown")
+                .show()
+        }.show()
+    }
 
-        override fun onSpeedEvent(event: SpeedEvent?) =
-            this@BaseActivity.onSpeedEvent(event)
-
-        override fun onBandwidthEvent(event: BandwidthEvent?) {
-            this@BaseActivity.onBandwidthEvent(event)
-        }
-
-        override fun onProfileChanged(event: ProfileChangedEvent?) =
-            this@BaseActivity.onProfileChanged(event)
-
-        override fun onProfileReloaded(event: ProfileReloadEvent?) {
-            this@BaseActivity.onProfileReloaded(event)
+    private fun resetDarkMode() {
+        when (uiSettings.get(UiSettings.DARK_MODE).also { darkMode = it }) {
+            UiSettings.DARK_MODE_AUTO ->
+                delegate.localNightMode = AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+            UiSettings.DARK_MODE_DARK ->
+                delegate.localNightMode = AppCompatDelegate.MODE_NIGHT_YES
+            UiSettings.DARK_MODE_LIGHT ->
+                delegate.localNightMode = AppCompatDelegate.MODE_NIGHT_NO
         }
     }
 
-    override fun onLogEvent(event: LogEvent?) {}
-    override fun onErrorEvent(event: ErrorEvent?) {}
-    override fun onProfileChanged(event: ProfileChangedEvent?) {}
-    override fun onProcessEvent(event: ProcessEvent?) {}
-    override fun onSpeedEvent(event: SpeedEvent?) {}
-    override fun onBandwidthEvent(event: BandwidthEvent?) {}
-    override fun onProfileReloaded(event: ProfileReloadEvent?) {}
-    override fun asBinder(): IBinder {
-        return observerBinder
+    private fun resetLightNavigationBar() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O)
+            return
+
+        val light = resources.getBoolean(R.bool.lightStatusBar)
+
+        if (light) {
+            window.decorView.systemUiVisibility =
+                window.decorView.systemUiVisibility or SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        } else {
+            window.decorView.systemUiVisibility =
+                window.decorView.systemUiVisibility and SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+        }
+
+        window.navigationBarColor = getColor(R.color.backgroundColor)
+    }
+
+    private fun resolveActivityTitle(): CharSequence {
+        val info = packageManager.getActivityInfo(componentName, 0)
+
+        if (info.labelRes <= 0)
+            return title
+
+        return resources.getText(info.labelRes)
     }
 }
